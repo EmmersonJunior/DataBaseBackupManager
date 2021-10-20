@@ -1,6 +1,7 @@
 ﻿using DataBaseBackupManager.Abstractions;
 using DataBaseBackupManager.Interfaces;
 using DataBaseBackupManager.Models;
+using DataBaseBackupManager.Util;
 using Microsoft.Extensions.Logging;
 using Npgsql;
 using System;
@@ -16,6 +17,10 @@ namespace DataBaseBackupManager.Repository
     {
         #region constants
         private const string NULLABLE_VALUE = "YES";
+        private const int UNIQUE_CONSTRAINT_PRIORITY = 0;
+        private const int PRIMARY_KEY_CONSTRAINT_PRIORITY = 1;
+        private const int FOREIGN_KEY_CONSTRAINT_PRIORITY = 2;
+        private const int PLAIN_INDEX_PRIORITY = 3;
         #endregion
 
         private readonly ILogger<PostgreSqlDataBaseDao> _logger;
@@ -119,42 +124,95 @@ namespace DataBaseBackupManager.Repository
         /// <returns>A list of all indexes in DataBase.</returns>
         IList<DbIndex> IDataBaseDao.GetIndexes(string schema, Connection connection)
         {
+            return GetIndexes(schema, connection);
+        }
+
+        private static IList<DbIndex> GetIndexes(string schema, Connection connection)
+        {
             PostgreSqlConnection postgreSqlConnection = (PostgreSqlConnection)connection;
+
+            NpgsqlCommand getConstraintIndexesCommand = new NpgsqlCommand(string.Format(PostgreSqlQueryConstants.GET_CONSTRAINT_INDEX, schema), postgreSqlConnection.Connection);
+            NpgsqlDataReader constraintIndexesReader = getConstraintIndexesCommand.ExecuteReader();
+            IList<DbIndex> indexes = new List<DbIndex>();
+
+            while (constraintIndexesReader.Read())
+            {
+                string indexName = constraintIndexesReader[PostgreSqlQueryConstants.CONSTRAINT_NAME].ToString();
+
+                if (!indexes.Any(i => i.IndexName.Equals(indexName)))
+                {
+                    DbIndex index = new DbIndex()
+                    {
+                        IndexName = indexName,
+                        Table = constraintIndexesReader[PostgreSqlQueryConstants.TABLE_NAME].ToString(),
+                        Columns = new List<string>() { constraintIndexesReader[PostgreSqlQueryConstants.COLUMN_NAME].ToString() },
+                        IndexType = IndexTypeParser.Parse(constraintIndexesReader[PostgreSqlQueryConstants.CONSTRAINT_TYPE].ToString()),
+                        ColumnReference = constraintIndexesReader[PostgreSqlQueryConstants.COLUMN_REFERENCE].ToString(),
+                        TableReference = constraintIndexesReader[PostgreSqlQueryConstants.TABLE_REFERENCE].ToString()
+                    };
+                    indexes.Add(index);
+                }
+                else
+                {
+                    DbIndex index = indexes.First(i => i.IndexName.Equals(indexName));
+
+                    if (index.IndexType.Equals(IndexType.UniqueKey))
+                    {
+                        index.Columns.Add(constraintIndexesReader[PostgreSqlQueryConstants.COLUMN_NAME].ToString());
+                    }
+                }
+            }
+            constraintIndexesReader.Close();
             NpgsqlCommand getAllIndexesCommand = new NpgsqlCommand(string.Format(PostgreSqlQueryConstants.GET_ALL_INDEXES, schema), postgreSqlConnection.Connection);
             NpgsqlDataReader allIndexesReader = getAllIndexesCommand.ExecuteReader();
-            IList<DbIndex> indexes = new List<DbIndex>();
 
             while (allIndexesReader.Read())
             {
-                indexes.Add(new DbIndex()
+                string indexName = allIndexesReader[PostgreSqlQueryConstants.INDEXNAME].ToString();
+                DbIndex index = indexes.FirstOrDefault(i => i.IndexName.Equals(indexName));
+
+                if (index == null)
                 {
-                    IndexName = allIndexesReader[PostgreSqlQueryConstants.INDEXNAME].ToString(),
-                    TableName = allIndexesReader[PostgreSqlQueryConstants.TABLENAME].ToString(),
-                    IndexCreationQuery = allIndexesReader[PostgreSqlQueryConstants.INDEXDEF].ToString()
-                });
-            }
-
-            allIndexesReader.Close();
-            NpgsqlCommand getConstraintIndexesCommand = new NpgsqlCommand(string.Format(PostgreSqlQueryConstants.GET_CONSTRAINT_INDEX, schema), postgreSqlConnection.Connection);
-            NpgsqlDataReader constraintIndexes = getConstraintIndexesCommand.ExecuteReader();
-
-            while (constraintIndexes.Read())
-            {
-                DbIndex index = indexes.FirstOrDefault(i => i.IndexName.Equals(constraintIndexes[PostgreSqlQueryConstants.CONSTRAINT_NAME].ToString()));
-
-                if (index != null)
-                {
-                    index.IndexDeletionQuery = $"ALTER TABLE {index.TableName} DROP CONSTRAINT {index.IndexName} CASCADE";
+                    indexes.Add(new DbIndex()
+                    {
+                        IndexName = indexName,
+                        Table = allIndexesReader[PostgreSqlQueryConstants.TABLENAME].ToString(),
+                        TableReference = allIndexesReader[PostgreSqlQueryConstants.TABLENAME].ToString(),
+                        IndexCreationQuery = allIndexesReader[PostgreSqlQueryConstants.INDEXDEF].ToString(),
+                        IndexDeletionQuery = $"DROP INDEX {indexName} CASCADE",
+                        Priority = PLAIN_INDEX_PRIORITY
+                    });
                 }
             }
-            constraintIndexes.Close();
+            allIndexesReader.Close();
 
-            IList<DbIndex> plainIndexes = indexes.Where(i => string.IsNullOrWhiteSpace(i.IndexDeletionQuery)).ToList();
-
-            foreach (DbIndex plainIndex in plainIndexes)
+            foreach (DbIndex index in indexes)
             {
-                plainIndex.IndexDeletionQuery = $"DROP INDEX {plainIndex.IndexName} CASCADE";
+                switch (index.IndexType)
+                {
+                    case IndexType.ForeignKey:
+                        index.IndexCreationQuery = $"ALTER TABLE ONLY {schema}.{index.Table} ADD CONSTRAINT {index.IndexName} FOREIGN KEY ({index.Columns.First()}) REFERENCES {schema}.{index.TableReference}({index.ColumnReference});";
+                        index.IndexDeletionQuery = $"ALTER TABLE {schema}.{index.Table} DROP CONSTRAINT {index.IndexName} CASCADE;";
+                        index.Priority = FOREIGN_KEY_CONSTRAINT_PRIORITY;
+                        break;
+
+                    case IndexType.PrimaryKey:
+                        index.IndexCreationQuery = $"ALTER TABLE ONLY {schema}.{index.Table} ADD CONSTRAINT {index.IndexName} PRIMARY KEY ({index.Columns.First()});";
+                        index.IndexDeletionQuery = $"ALTER TABLE {schema}.{index.Table} DROP CONSTRAINT {index.IndexName} CASCADE;";
+                        index.Priority = PRIMARY_KEY_CONSTRAINT_PRIORITY;
+                        break;
+
+                    case IndexType.UniqueKey:
+                        index.IndexCreationQuery = $"ALTER TABLE ONLY {schema}.{index.Table} ADD CONSTRAINT {index.IndexName} UNIQUE ({string.Join(", ", index.Columns.Distinct())});";
+                        index.IndexDeletionQuery = $"ALTER TABLE {schema}.{index.Table} DROP CONSTRAINT {index.IndexName} CASCADE;";
+                        index.Priority = UNIQUE_CONSTRAINT_PRIORITY;
+                        break;
+
+                    default:
+                        break;
+                }
             }
+            indexes = indexes.OrderBy(i => i.Priority).ToList();
 
             return indexes;
         }
@@ -193,8 +251,15 @@ namespace DataBaseBackupManager.Repository
 
             foreach (DbIndex index in indexes)
             {
-                NpgsqlCommand dropIndexCommand = new NpgsqlCommand(index.IndexCreationQuery, postgreSqlConnection.Connection);
-                dropIndexCommand.ExecuteNonQuery();
+                try
+                {
+                    NpgsqlCommand dropIndexCommand = new NpgsqlCommand(index.IndexCreationQuery, postgreSqlConnection.Connection);
+                    dropIndexCommand.ExecuteNonQuery();
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogError(ex.ToString());
+                }
             }
         }
 
@@ -244,6 +309,7 @@ namespace DataBaseBackupManager.Repository
         IList<Table> IDataBaseDao.GetTableInformations(string schema, IList<string> tables, Connection connection)
         {
             IList<Table> tablesData = new List<Table>();
+            IList<DbIndex> indexes = GetIndexes(schema, connection);
 
             foreach (string tableName in tables)
             {
@@ -274,12 +340,11 @@ namespace DataBaseBackupManager.Repository
                     }
                 }
                 selectTableInfoReader.Close();
-                IList<Constraint> constraints = GetConstraints(schema, tableName, connection);
                 Table table = new Table()
                 {
                     Name = tableName,
                     Columns = columns.ToArray(),
-                    Constraints = constraints.ToArray(),
+                    Constraints = indexes.Where(i => i.Table.Equals(tableName)).ToArray(),
                     Excluded = GetExcludedTable(tableName)
                 };
                 tablesData.Add(table);
@@ -298,36 +363,10 @@ namespace DataBaseBackupManager.Repository
 
             return excludedColumns;
         }
+
         private bool GetExcludedTable(string table)
         {
             return _backupConfiguration.TablesToExclude.Contains(table);
-        }
-
-        private IList<Constraint> GetConstraints(string schema, string table, Connection connection)
-        {
-            PostgreSqlConnection postgreSqlConnection = (PostgreSqlConnection)connection;
-            NpgsqlCommand selectTableInfoCommand = new NpgsqlCommand(string.Format(PostgreSqlQueryConstants.SELECT_SCHEMA_CONSTRAINTS, schema, table), postgreSqlConnection.Connection);
-            NpgsqlDataReader selectTableInfoReader = selectTableInfoCommand.ExecuteReader();
-
-            IList<Constraint> constraints = new List<Constraint>();
-
-            while (selectTableInfoReader.Read())
-            {
-                int constraintType = char.Parse(selectTableInfoReader[PostgreSqlQueryConstants.CONSTRAINT_TYPE].ToString());
-
-                Constraint constraint = new Constraint()
-                {
-                    TableReference = selectTableInfoReader[PostgreSqlQueryConstants.TABLE_REFERENCE].ToString(),
-                    ColumnName = selectTableInfoReader[PostgreSqlQueryConstants.COLUMN_NAME].ToString(),
-                    ColumnReference = selectTableInfoReader[PostgreSqlQueryConstants.COLUMN_REFERENCE].ToString(),
-                    ConstraintName = selectTableInfoReader[PostgreSqlQueryConstants.CONSTRAINT_NAME].ToString(),
-                    DataType = (ConstraintType)constraintType
-                };
-                constraints.Add(constraint);
-            }
-            selectTableInfoReader.Close();
-
-            return constraints;
         }
 
         /// <summary>

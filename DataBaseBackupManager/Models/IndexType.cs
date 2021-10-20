@@ -1,27 +1,23 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Text;
-
-namespace DataBaseBackupManager.Models
+﻿namespace DataBaseBackupManager.Models
 {
     /// <summary>
     /// Maps the constraint types.
     /// </summary>
-    internal enum  ConstraintType
+    internal enum IndexType
     {
         /// <summary>
         /// The table foreign key.
         /// </summary>
-        ForeignKey = 'f',
+        ForeignKey = 1,
 
         /// <summary>
         /// The primary key of the table.
         /// </summary>
-        PrimaryKey = 'p',
+        PrimaryKey = 2,
 
         /// <summary>
         /// A unique key for column.
         /// </summary>
-        UniqueKey = 'u'
+        UniqueKey = 3
     }
 }

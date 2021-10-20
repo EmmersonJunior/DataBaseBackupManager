@@ -30,7 +30,7 @@ namespace DataBaseBackupManager.Models
         /// <summary>
         /// The table constraints.
         /// </summary>
-        internal Constraint[] Constraints { get; set; }
+        internal DbIndex[] Constraints { get; set; }
 
         /// <summary>
         /// The priority for restoring.

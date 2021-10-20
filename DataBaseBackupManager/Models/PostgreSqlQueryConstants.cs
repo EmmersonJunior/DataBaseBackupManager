@@ -8,8 +8,8 @@
         internal const string SELECT_TABLE_NAME = "SELECT table_name FROM information_schema.\"tables\" where table_schema = \'{0}\'";
         internal const string TABLE_NAME = "table_name";
         internal const string COLUMN_NAME = "column_name";
-        internal const string TABLE_REFERENCE = "reference_table";
-        internal const string COLUMN_REFERENCE = "reference_col";
+        internal const string TABLE_REFERENCE = "foreign_table_name";
+        internal const string COLUMN_REFERENCE = "foreign_column_name";
         internal const string CONSTRAINT_NAME = "constraint_name";
         internal const string CONSTRAINT_TYPE = "constraint_type";
         internal const string COUNT_COLUMN = "count";
@@ -26,7 +26,25 @@
         internal const string DATA_TYPE = "data_type";
         internal const string IS_NULLABLE = "is_nullable";
         internal const string INSERT_DATA = "INSERT INTO {0} {1} VALUES {2}";
-        internal const string GET_CONSTRAINT_INDEX = "SELECT constraint_name FROM information_schema.constraint_table_usage WHERE table_schema = '{0}'";
+        //internal const string GET_CONSTRAINT_INDEX = "SELECT constraint_name FROM information_schema.constraint_table_usage WHERE table_schema = '{0}'";
+        internal const string GET_CONSTRAINT_INDEX = "SELECT " +
+                                                    "tc.table_schema, " +
+                                                    "tc.constraint_name, " +
+                                                    "tc.constraint_type, " +
+                                                    "tc.table_name, " +
+                                                    "kcu.column_name, " +
+                                                    "ccu.table_schema AS foreign_table_schema, " +
+                                                    "ccu.table_name AS foreign_table_name, " +
+                                                    "ccu.column_name AS foreign_column_name " +
+                                                    "FROM " +
+                                                    "information_schema.table_constraints AS tc " +
+                                                    "JOIN information_schema.key_column_usage AS kcu " +
+                                                       "ON tc.constraint_name = kcu.constraint_name " +
+                                                        "AND tc.table_schema = kcu.table_schema " +
+                                                    "JOIN information_schema.constraint_column_usage AS ccu " +
+                                                        "ON ccu.constraint_name = tc.constraint_name " +
+                                                        "AND ccu.table_schema = tc.table_schema " +
+                                                    "WHERE tc.table_schema = '{0}'";
         internal const string GET_ALL_INDEXES = "SELECT indexname, tablename, indexdef FROM pg_indexes WHERE schemaname = '{0}'";
         internal const string SELECT_SCHEMA_CONSTRAINTS = "SELECT * FROM ( SELECT " +
                                                         "pgc.contype as constraint_type, " +
@@ -65,7 +83,7 @@
                                                             "LEFT JOIN information_schema.constraint_column_usage ccu ON pgc.conname = ccu.CONSTRAINT_NAME " +
                                                             "AND nsp.nspname = ccu.CONSTRAINT_SCHEMA " +
                                                         ") " +
-                                                    ")   as foo " +
+                                                    ") as foo " +
                                                     "where constraint_type is not null and constraint_type = 'f' and table_name = '{1}' " +
                                                     "ORDER BY table_name desc ";
 
